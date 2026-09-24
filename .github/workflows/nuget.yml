@@ -87,6 +87,8 @@ jobs:
             --build-number="${{ env.JFROG_CLI_BUILD_NUMBER }}"
 
       # 3) 编译并打包 NuGet 包
+      #    勿直接 nuget pack .csproj：packages.config 会去本地 packages/ 找 *.nupkg，
+      #    而现代 restore 装到 %USERPROFILE%\.nuget\packages，导致 NU5012。
       - name: Build and pack
         shell: pwsh
         run: |
@@ -94,11 +96,41 @@ jobs:
           msbuild MyLogger.sln /p:Configuration=Release /restore:false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+          $outDir = "MyLogger/bin/Release"
+          if (!(Test-Path "$outDir/MyLogger.dll")) {
+            throw "Build output not found: $outDir/MyLogger.dll"
+          }
+
           if (!(Test-Path nupkgs)) { New-Item -ItemType Directory -Path nupkgs | Out-Null }
-          nuget pack MyLogger/MyLogger.csproj `
-            -Properties Configuration=Release `
+
+          # 用已编译 DLL 生成 nuspec 再 pack（依赖仅作元数据；Build Info 里的依赖来自 restore）
+          $nuspec = @"
+          <?xml version="1.0"?>
+          <package>
+            <metadata>
+              <id>MyLogger</id>
+              <version>1.0.0</version>
+              <authors>JFrog</authors>
+              <description>JFrog custom logger</description>
+              <dependencies>
+                <dependency id="log4net" version="2.0.8" />
+              </dependencies>
+            </metadata>
+            <files>
+              <file src="MyLogger.dll" target="lib\net48" />
+              <file src="MyLogger.pdb" target="lib\net48" />
+            </files>
+          </package>
+          "@
+          # 去掉 here-string 缩进空格，避免 nuspec 解析问题
+          $nuspec = ($nuspec -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+          Set-Content -Path MyLogger.pack.nuspec -Value $nuspec -Encoding UTF8
+
+          nuget pack MyLogger.pack.nuspec `
+            -BasePath $outDir `
             -OutputDirectory nupkgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem nupkgs/*.nupkg | ForEach-Object { Write-Host "Packed $($_.Name)" }
 
       # 4) 上传到 Artifactory，同时记入 Build Info
       #    推荐 jf rt upload（比 dotnet nuget push 更能完整写入 Build Info 中的 Artifacts）
