@@ -25,6 +25,8 @@ env:
   # 解析 / 部署仓库（通常 resolve 用 virtual，deploy 用 local 或 virtual）
   NUGET_REPO_RESOLVE: guoyz-github-nuget-virtual
   NUGET_REPO_DEPLOY: guoyz-github-nuget-virtual
+  # windows-latest 已无 .NET Framework 4.5 Targeting Pack，构建时重定向到 4.8
+  TARGET_FRAMEWORK_VERSION: v4.8
 
 jobs:
   build-publish-scan:
@@ -67,13 +69,22 @@ jobs:
             --build-number="${{ env.JFROG_CLI_BUILD_NUMBER }}"
 
       # 3) 编译并打包 NuGet 包
+      #    MSB3644: windows-latest 无 v4.5 reference assemblies，用 TargetFrameworkVersion 覆盖为 v4.8
       - name: Build and pack
+        shell: pwsh
         run: |
-          msbuild MyLogger.sln /p:Configuration=Release /restore:false
+          $ErrorActionPreference = "Stop"
+          msbuild MyLogger.sln `
+            /p:Configuration=Release `
+            /p:TargetFrameworkVersion=${{ env.TARGET_FRAMEWORK_VERSION }} `
+            /restore:false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
           if (!(Test-Path nupkgs)) { New-Item -ItemType Directory -Path nupkgs | Out-Null }
           nuget pack MyLogger/MyLogger.csproj `
-            -Properties Configuration=Release `
+            -Properties "Configuration=Release;TargetFrameworkVersion=${{ env.TARGET_FRAMEWORK_VERSION }}" `
             -OutputDirectory nupkgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # 4) 上传到 Artifactory，同时记入 Build Info
       #    推荐 jf rt upload（比 dotnet nuget push 更能完整写入 Build Info 中的 Artifacts）
