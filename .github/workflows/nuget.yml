@@ -55,6 +55,24 @@ jobs:
       - name: Ping Artifactory
         run: jf rt ping
 
+      # windows-latest 无 .NET Framework 4.5 Targeting Pack；在 restore 前统一改到 v4.8，避免 restore/build TFM 不一致
+      - name: Retarget project to .NET Framework 4.8
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tfv = $env:TARGET_FRAMEWORK_VERSION
+          Get-ChildItem -Recurse -Include *.csproj,packages.config | ForEach-Object {
+            $content = Get-Content $_.FullName -Raw
+            $updated = $content `
+              -replace 'v4\.5', $tfv `
+              -replace 'targetFramework="net45"', 'targetFramework="net48"' `
+              -replace 'targetFramework="net452"', 'targetFramework="net48"'
+            if ($updated -ne $content) {
+              Set-Content -Path $_.FullName -Value $updated -NoNewline
+              Write-Host "Updated $($_.FullName)"
+            }
+          }
+
       # 1) 配置 NuGet 解析仓库
       - name: Configure NuGet repositories
         run: |
@@ -69,20 +87,16 @@ jobs:
             --build-number="${{ env.JFROG_CLI_BUILD_NUMBER }}"
 
       # 3) 编译并打包 NuGet 包
-      #    MSB3644: windows-latest 无 v4.5 reference assemblies，用 TargetFrameworkVersion 覆盖为 v4.8
       - name: Build and pack
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          msbuild MyLogger.sln `
-            /p:Configuration=Release `
-            /p:TargetFrameworkVersion=${{ env.TARGET_FRAMEWORK_VERSION }} `
-            /restore:false
+          msbuild MyLogger.sln /p:Configuration=Release /restore:false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
           if (!(Test-Path nupkgs)) { New-Item -ItemType Directory -Path nupkgs | Out-Null }
           nuget pack MyLogger/MyLogger.csproj `
-            -Properties "Configuration=Release;TargetFrameworkVersion=${{ env.TARGET_FRAMEWORK_VERSION }}" `
+            -Properties Configuration=Release `
             -OutputDirectory nupkgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
