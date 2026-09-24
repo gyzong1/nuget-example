@@ -1,0 +1,101 @@
+# GitHub Actions + JFrog CLI — NuGet 构建 / 上传 / Build Info / Xray 扫描
+# 仓库: https://github.com/gyzong1/nuget-demo
+#
+# 仓库 Secrets / Variables:
+#   vars.JF_URL              JFrog Platform URL，如 https://xxx.com
+#   secrets.JF_ACCESS_TOKEN  具备 Deploy / Build Info / Xray Scan 权限的 Access Token
+#
+# Artifactory 仓库名可按环境修改；建议使用 NuGet virtual（含 remote + local，并设置 Default Deployment Repository）
+#
+# 说明: nuget-demo 为经典 .NET Framework 项目，使用 windows-latest + NuGet/MSBuild。
+#       若为 SDK 风格 .csproj，可改为 ubuntu-latest + jf dotnet（见 README）。
+
+name: NuGet Build & Publish to Artifactory
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+env:
+  JFROG_CLI_BUILD_NAME: guoyz-github-nuget-example
+  JFROG_CLI_BUILD_NUMBER: ${{ github.run_number }}
+  # 解析 / 部署仓库（通常 resolve 用 virtual，deploy 用 local 或 virtual）
+  NUGET_REPO_RESOLVE: guoyz-github-nuget-virtual
+  NUGET_REPO_DEPLOY: guoyz-github-nuget-virtual
+
+jobs:
+  build-publish-scan:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: nuget/setup-nuget@v2
+
+      - name: Setup JFrog CLI
+        uses: jfrog/setup-jfrog-cli@v4
+        with:
+          # 由本 workflow 显式执行 bce / bag / bp，关闭 action 自动发布，避免重复 Build Info
+          disable-auto-build-publish: true
+        env:
+          JF_URL: ${{ vars.JF_URL }}
+          JF_ACCESS_TOKEN: ${{ secrets.JF_ACCESS_TOKEN }}
+
+      - name: Ping Artifactory
+        run: jf rt ping
+
+      # 1) 配置 NuGet 解析仓库
+      - name: Configure NuGet repositories
+        run: |
+          jf nuget-config `
+            --repo-resolve="${{ env.NUGET_REPO_RESOLVE }}"
+
+      # 2) 从 Artifactory 还原依赖，并记入 Build Info
+      - name: Restore dependencies
+        run: |
+          jf nuget restore MyLogger.sln `
+            --build-name="${{ env.JFROG_CLI_BUILD_NAME }}" `
+            --build-number="${{ env.JFROG_CLI_BUILD_NUMBER }}"
+
+      # 3) 编译并打包 NuGet 包
+      - name: Build and pack
+        run: |
+          msbuild MyLogger.sln /p:Configuration=Release /restore:false
+          if (!(Test-Path nupkgs)) { New-Item -ItemType Directory -Path nupkgs | Out-Null }
+          nuget pack MyLogger/MyLogger.csproj `
+            -Properties Configuration=Release `
+            -OutputDirectory nupkgs
+
+      # 4) 上传到 Artifactory，同时记入 Build Info
+      #    推荐 jf rt upload（比 dotnet nuget push 更能完整写入 Build Info 中的 Artifacts）
+      - name: Publish package to Artifactory
+        run: |
+          jf rt upload "nupkgs/*.nupkg" "${{ env.NUGET_REPO_DEPLOY }}/" `
+            --build-name="${{ env.JFROG_CLI_BUILD_NAME }}" `
+            --build-number="${{ env.JFROG_CLI_BUILD_NUMBER }}"
+
+      # 5) 搜集并发布 Build Info（环境变量 + Git VCS + 发布到 Artifactory）
+      - name: Collect and publish build info
+        run: |
+          jf rt build-collect-env `
+            "${{ env.JFROG_CLI_BUILD_NAME }}" "${{ env.JFROG_CLI_BUILD_NUMBER }}"
+          jf rt build-add-git `
+            "${{ env.JFROG_CLI_BUILD_NAME }}" "${{ env.JFROG_CLI_BUILD_NUMBER }}"
+          jf rt build-publish `
+            "${{ env.JFROG_CLI_BUILD_NAME }}" "${{ env.JFROG_CLI_BUILD_NUMBER }}"
+
+      # 6) 使用 Xray 扫描已发布的 Build（有漏洞也不阻断流水线）
+      - name: Scan build with Xray
+        run: |
+          jf build-scan `
+            "${{ env.JFROG_CLI_BUILD_NAME }}" "${{ env.JFROG_CLI_BUILD_NUMBER }}" `
+            --fail=false
